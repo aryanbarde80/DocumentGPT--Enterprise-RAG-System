@@ -1,0 +1,105 @@
+version: "3.9"
+
+# ─── Networks ─────────────────────────────────────────────────────────────────
+networks:
+  documentgpt-net:
+    driver: bridge
+
+# ─── Volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  redis-data:
+
+# ─── Services ─────────────────────────────────────────────────────────────────
+services:
+
+  # ── FastAPI Application ────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: documentgpt:latest
+    container_name: documentgpt-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # ── Required secrets — populate in .env or ECS task def ──
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_ENVIRONMENT=${PINECONE_ENVIRONMENT:-us-east-1}
+      # ── App settings ──
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - DEBUG=${DEBUG:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # ── Service URLs ──
+      - REDIS_URL=redis://redis:6379/0
+      # ── Pinecone ──
+      - PINECONE_INDEX_NAME=${PINECONE_INDEX_NAME:-documentgpt-index}
+      - PINECONE_NAMESPACE=${PINECONE_NAMESPACE:-default}
+      # ── OpenAI ──
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      - OPENAI_CHAT_MODEL=${OPENAI_CHAT_MODEL:-gpt-4o}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - documentgpt-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: documentgpt-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --save 60 1
+      --loglevel warning
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ""
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - documentgpt-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 600M
+
+  # ── Redis Commander (dev only — UI for Redis inspection) ───────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: documentgpt-redis-ui
+    restart: unless-stopped
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - documentgpt-net
+    profiles:
+      - dev  # Only starts with: docker compose --profile dev up
